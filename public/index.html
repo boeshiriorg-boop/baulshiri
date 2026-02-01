@@ -1,0 +1,164 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <title>Pizarra Pro Colaborativa</title>
+    <style>
+        body { display: flex; font-family: 'Segoe UI', sans-serif; background: #1e1e1e; color: white; margin: 0; height: 100vh; overflow: hidden; }
+        .sidebar { width: 250px; background: #252526; padding: 15px; display: flex; flex-direction: column; gap: 20px; border-right: 1px solid #333; }
+        .canvas-area { flex-grow: 1; display: flex; justify-content: center; align-items: center; background: #333; position: relative; }
+        #canvas-container { position: relative; background: white; width: 800px; height: 600px; box-shadow: 0 0 30px rgba(0,0,0,0.5); }
+        canvas { position: absolute; top: 0; left: 0; touch-action: none; cursor: crosshair; }
+        .layer-item { background: #3c3c3c; padding: 8px; margin-bottom: 5px; border-radius: 4px; display: flex; justify-content: space-between; cursor: pointer; }
+        .active { border: 2px solid #007acc; }
+        #login-screen { position: fixed; inset: 0; background: rgba(0,0,0,0.9); z-index: 10000; display: flex; justify-content: center; align-items: center; }
+        button { cursor: pointer; padding: 10px; border: none; border-radius: 4px; font-weight: bold; width: 100%; margin-bottom: 10px; }
+    </style>
+</head>
+<body>
+
+    <div id="login-screen">
+        <div style="background: #2d2d2d; padding: 40px; border-radius: 12px; text-align: center;">
+            <h1>🎨 BahulShiri Paint</h1>
+            <button id="btn-login" style="background: #4285F4; color: white; font-size: 16px;">Entrar con Google</button>
+        </div>
+    </div>
+
+    <div class="sidebar">
+        <h3>Herramientas</h3>
+        <input type="color" id="colorPicker" style="width:100%; height:40px;">
+        <label>Grosor:</label>
+        <input type="range" id="sizePicker" min="1" max="50" value="5">
+        <button onclick="setMode('pencil')" id="btn-pencil" style="background:#007acc; color:white;">✏️ Lápiz</button>
+        <button onclick="setMode('eraser')" id="btn-eraser" style="background:#444; color:white;">🧽 Borrador</button>
+        
+        <h3>Capas</h3>
+        <button onclick="addLayer()" style="background:#28a745; color:white;">+ Nueva Capa</button>
+        <div id="layersList"></div>
+
+        <h3>Usuarios</h3>
+        <ul id="users-list" style="font-size:12px; color:#aaa; list-style:none; padding:0;"></ul>
+        
+        <button onclick="saveAsJPEG()" style="background:#d4a017; color:black; margin-top:auto;">💾 Guardar Foto</button>
+    </div>
+
+    <div class="canvas-area">
+        <div id="canvas-container">
+            <canvas id="canvas-0" width="800" height="600"></canvas>
+        </div>
+    </div>
+
+    <script src="/socket.io/socket.io.js"></script>
+    <script type="module">
+        import { initializeApp } from "https://www.gstatic.com/firebasejs/10.0.0/firebase-app.js";
+        import { getAuth, signInWithPopup, GoogleAuthProvider, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/10.0.0/firebase-auth.js";
+
+        // PEGA TUS DATOS DE FIREBASE AQUÍ (Los que salen tras "Registrar app")
+        const firebaseConfig = {
+            apiKey: "AIzaSyAmf8fjUwUZi0WumOSX_wxhaPLOqz8S_TA",
+            authDomain: "baulshiri.firebaseapp.com",
+            projectId: "baulshiri",
+            storageBucket: "baulshiri.appspot.com",
+            messagingSenderId: "660045058514",
+            appId: "1:660045058514:web:09ff239473c1769943f80b"
+        };
+
+        const app = initializeApp(firebaseConfig);
+        const auth = getAuth(app);
+        const provider = new GoogleAuthProvider();
+
+        const socket = io();
+        let layers = [document.getElementById('canvas-0').getContext('2d')];
+        let activeLayerIndex = 0;
+        let drawing = false;
+        let mode = 'pencil';
+        let lastX = 0, lastY = 0;
+
+        // Login
+        document.getElementById('btn-login').onclick = () => signInWithPopup(auth, provider);
+        onAuthStateChanged(auth, (user) => {
+            if (user) {
+                document.getElementById('login-screen').style.display = 'none';
+                socket.emit('set-username', user.displayName);
+            }
+        });
+
+        // Capas y Dibujo
+        window.addLayer = () => {
+            const idx = layers.length;
+            const canvas = document.createElement('canvas');
+            canvas.width = 800; canvas.height = 600;
+            canvas.style.zIndex = idx;
+            canvas.style.pointerEvents = "none";
+            document.getElementById('canvas-container').appendChild(canvas);
+            layers.push(canvas.getContext('2d'));
+            updateLayersUI();
+        };
+
+        function updateLayersUI() {
+            const list = document.getElementById('layersList');
+            list.innerHTML = "";
+            layers.forEach((_, i) => {
+                const div = document.createElement('div');
+                div.className = `layer-item ${i === activeLayerIndex ? 'active' : ''}`;
+                div.onclick = () => { activeLayerIndex = i; updateLayersUI(); };
+                div.innerHTML = `Capa ${i+1}`;
+                list.prepend(div);
+            });
+        }
+        updateLayersUI();
+
+        window.setMode = (m) => mode = m;
+
+        const mainCanvas = document.getElementById('canvas-0');
+        mainCanvas.addEventListener('pointerdown', (e) => {
+            drawing = true;
+            const rect = mainCanvas.getBoundingClientRect();
+            lastX = e.clientX - rect.left;
+            lastY = e.clientY - rect.top;
+        });
+
+        mainCanvas.addEventListener('pointermove', (e) => {
+            if (!drawing) return;
+            const rect = mainCanvas.getBoundingClientRect();
+            const x = e.clientX - rect.left;
+            const y = e.clientY - rect.top;
+            
+            const config = {
+                color: document.getElementById('colorPicker').value,
+                size: document.getElementById('sizePicker').value * (e.pressure || 1),
+                mode: mode
+            };
+
+            draw(lastX, lastY, x, y, config, activeLayerIndex, false);
+            lastX = x; lastY = y;
+        });
+
+        window.addEventListener('pointerup', () => drawing = false);
+
+        function draw(x1, y1, x2, y2, config, layerIdx, isRemote) {
+            const ctx = layers[layerIdx];
+            ctx.globalCompositeOperation = config.mode === 'eraser' ? 'destination-out' : 'source-over';
+            ctx.lineJoin = 'round'; ctx.lineCap = 'round';
+            ctx.strokeStyle = config.color; ctx.lineWidth = config.size;
+            ctx.beginPath(); ctx.moveTo(x1, y1); ctx.lineTo(x2, y2); ctx.stroke();
+            if (!isRemote) socket.emit('draw', { x1, y1, x2, y2, config, layer: layerIdx });
+        }
+
+        socket.on('draw', (d) => draw(d.x1, d.y1, d.x2, d.y2, d.config, d.layer, true));
+        socket.on('update-users', (u) => document.getElementById('users-list').innerHTML = u.map(n => `<li>● ${n}</li>`).join(''));
+
+        window.saveAsJPEG = () => {
+            const temp = document.createElement('canvas');
+            temp.width = 800; temp.height = 600;
+            const tCtx = temp.getContext('2d');
+            tCtx.fillStyle = "white"; tCtx.fillRect(0,0,800,600);
+            layers.forEach(l => tCtx.drawImage(l.canvas, 0, 0));
+            const link = document.createElement('a');
+            link.download = 'dibujo.jpg';
+            link.href = temp.toDataURL('image/jpeg');
+            link.click();
+        };
+    </script>
+</body>
+</html>
